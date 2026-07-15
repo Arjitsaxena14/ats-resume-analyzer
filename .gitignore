@@ -1,0 +1,17 @@
+# Python envs
+.venv/
+__pycache__/
+*.pyc
+backend/.env
+
+# Node / React dependencies and builds
+node_modules/
+dist/
+.eslintcache
+
+# SQLite Database
+backend/*.db
+
+# OS / Temporary files
+.DS_Store
+Thumbs.db
