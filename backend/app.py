@@ -13,6 +13,9 @@ from database import init_db, save_analysis, get_history, get_analysis, delete_a
 from resume_parser import extract_text
 from ai_analyzer import analyze_resume_with_gemini
 
+# Initialize Database on import to ensure SQLite tables exist in production/Gunicorn
+init_db()
+
 app = Flask(__name__)
 
 # Configure CORS with standard safety settings (allowing development host)
@@ -36,13 +39,11 @@ def rate_limit(limit=60, period=60):
         @wraps(f)
         def wrapped(*args, **kwargs):
             ip = request.remote_addr or "127.0.0.1"
-            # Fallback for proxies
             if request.headers.getlist("X-Forwarded-For"):
                 ip = request.headers.getlist("X-Forwarded-For")[0]
                 
             with limiter_lock:
                 now = time.time()
-                # Remove timestamps older than the rate limit window
                 IP_LIMITS[ip] = [t for t in IP_LIMITS[ip] if now - t < period]
                 
                 if len(IP_LIMITS[ip]) >= limit:
@@ -60,9 +61,8 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/api/analyze', methods=['POST'])
-@rate_limit(limit=5, period=60) # Strict rate limit on heavy AI processing
+@rate_limit(limit=5, period=60)
 def analyze_resume():
-    # 1. Strict Request Schema Validation (Unexpected Fields checks)
     allowed_form_keys = {'job_description'}
     if not set(request.form.keys()).issubset(allowed_form_keys):
         return jsonify({'error': 'Bad Request', 'message': 'Unexpected fields in form data.'}), 400
@@ -78,22 +78,19 @@ def analyze_resume():
     if file.filename == '':
         return jsonify({'error': 'Bad Request', 'message': 'No file selected for analysis.'}), 400
         
-    # 2. Strict Input validation & File verification
     if not allowed_file(file.filename):
         return jsonify({'error': 'Unsupported Media Type', 'message': 'Invalid file extension. Only PDF and DOCX files are allowed.'}), 415
 
-    # Check file size explicitly to prevent buffer exhaustion before processing
     try:
         file.seek(0, os.SEEK_END)
         file_length = file.tell()
-        file.seek(0) # Reset stream pointer
+        file.seek(0)
         
         if file_length > 10 * 1024 * 1024:
             return jsonify({'error': 'Payload Too Large', 'message': 'File size exceeds the 10MB safety limit.'}), 413
     except Exception:
         return jsonify({'error': 'Internal Server Error', 'message': 'Failed to inspect file payload size.'}), 500
 
-    # 3. Form input sanitization and length validation
     job_description = request.form.get('job_description', '')
     if not isinstance(job_description, str):
         return jsonify({'error': 'Bad Request', 'message': 'Job description field must be a valid text string.'}), 400
@@ -101,26 +98,19 @@ def analyze_resume():
     if len(job_description) > 5000:
         return jsonify({'error': 'Bad Request', 'message': 'Job description text exceeds maximum allowed length of 5000 characters.'}), 400
 
-    # Strip dangerous HTML tags to prevent cross-site scripting (XSS)
     job_description = re.sub(r'<[^>]*>', '', job_description)
 
-    # 4. Safe temp file handling and execution
     filename = secure_filename(file.filename)
     temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, filename)
     
     try:
         file.save(temp_path)
-        
-        # Extract text from file securely
         text_content = extract_text(temp_path, filename)
         if not text_content or text_content.strip() == "":
             return jsonify({'error': 'Unprocessable Entity', 'message': 'Could not parse text content. Ensure document is not encrypted or blank.'}), 422
             
-        # Perform AI Analysis
         analysis = analyze_resume_with_gemini(text_content, job_description)
-        
-        # Save record to SQLite securely (using parameterised query backend database.py)
         analysis_id = save_analysis(filename, text_content, analysis)
         
         return jsonify({
@@ -151,7 +141,6 @@ def get_all_history():
 @rate_limit(limit=30, period=60)
 def get_history_by_id(analysis_id):
     try:
-        # Route parameters type checking is enforced by Flask routing rule (<int:analysis_id>)
         record = get_analysis(analysis_id)
         if record:
             return jsonify(record), 200
@@ -173,5 +162,6 @@ def delete_history_by_id(analysis_id):
         return jsonify({'error': 'Internal Server Error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
-    init_db()
-    app.run(host='127.0.0.1', port=5000, debug=True)
+    # Support Render environment variables to bind ports correctly on fallback python executions
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
